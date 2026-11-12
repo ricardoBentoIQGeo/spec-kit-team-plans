@@ -28,5 +28,6 @@ introduced/fixed behavior. Do not perform or mark implementation tasks complete.
 
 ## Future execution gate
 
-Implementation, branch creation, commits, pushes, builds/tests against code
-repositories, and Jira mutations require a separate user-approved workflow.
+Branch creation requires a separate branch preview and explicit approval per
+repository. Implementation, builds/tests against code repositories, and Jira
+mutations remain outside this workflow. Commit only if authorized. Never push.

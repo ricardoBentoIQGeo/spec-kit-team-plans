@@ -3,7 +3,7 @@
 **Feature ID**: {{FEATURE}}
 **Repositories**: {{REPOSITORIES}}
 **Specification**: [spec.md](./spec.md)
-**Mode**: Planning only - implementation and branch creation are not enabled
+**Mode**: Planning only - branch creation requires a separate preview and approval
 **Status**: Draft scaffold - inspect source and resolve questions before acceptance
 
 ## Summary and acceptance mapping

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create planning artifacts in the shared repository, never in code repositories."""
+"""Create shared planning artifacts and explicitly preview/apply local feature branches."""
 
 import argparse
 from datetime import datetime, timezone
@@ -101,16 +101,66 @@ def create_feature(directory, arguments):
     return metadata
 
 
+def feature_branch(metadata, arguments):
+    """Preflight one explicit checkout and optionally create its local branch."""
+    if arguments.repo not in metadata["repositories"]:
+        raise ValueError(f"{arguments.repo} is not selected for this feature")
+    current = repository_context([arguments.repo])[arguments.repo]
+    baseline = metadata["repositories"][arguments.repo]
+    root = Path(current["host_path"])
+    if current["host_path"] != baseline["host_path"]:
+        raise ValueError("Repository mapping changed since feature creation; review the baseline")
+    if current["branch"] == "HEAD":
+        raise ValueError("Cannot create a feature branch from a detached HEAD")
+    if current["branch"] != baseline["branch"] or current["revision"] != baseline["revision"]:
+        raise ValueError("Repository branch/HEAD changed since feature creation; review the baseline")
+    if current["status"]:
+        raise ValueError(f"{arguments.repo} has staged, unstaged, or untracked changes; refusing checkout")
+    for state in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"):
+        state_path = Path(git_read(root, "rev-parse", "--git-path", state))
+        if not state_path.is_absolute():
+            state_path = root / state_path
+        if state_path.exists():
+            raise ValueError(f"{arguments.repo} has an operation in progress: {state}")
+    if git_read(root, "check-ref-format", "--branch", arguments.branch) != arguments.branch:
+        raise ValueError("Supply a literal branch name, not a checkout shorthand")
+    reference = f"refs/heads/{arguments.branch}"
+    if reference in git_read(root, "for-each-ref", "--format=%(refname)", reference).splitlines():
+        raise ValueError(f"Local branch already exists: {arguments.branch}")
+    result = {
+        "REPOSITORY": arguments.repo,
+        "HOST_PATH": str(root),
+        "FROM_BRANCH": current["branch"],
+        "FROM_REVISION": current["revision"],
+        "BRANCH_NAME": arguments.branch,
+        "APPLIED": False,
+        "COMMAND": ["git", "-C", str(root), "checkout", "-b", arguments.branch, current["revision"]],
+    }
+    if arguments.apply:
+        subprocess.run(result["COMMAND"], check=True, capture_output=True, text=True)
+        if (
+            git_read(root, "rev-parse", "--abbrev-ref", "HEAD") != arguments.branch
+            or git_read(root, "rev-parse", "HEAD") != current["revision"]
+        ):
+            raise ValueError("Checkout completed but verification failed; inspect repository state; no rollback attempted")
+        result["APPLIED"] = True
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("create", "plan", "tasks", "context"):
+    for name in ("create", "plan", "tasks", "context", "branch"):
         command = commands.add_parser(name)
         command.add_argument("--feature", required=True)
         command.add_argument("--json", action="store_true")
         if name == "create":
             command.add_argument("--repos", nargs="+", choices=("core", "apps"), required=True)
             command.add_argument("--title", required=True)
+        if name == "branch":
+            command.add_argument("--repo", choices=("core", "apps"), required=True)
+            command.add_argument("--branch", required=True)
+            command.add_argument("--apply", action="store_true", help="Create and check out the local branch")
     arguments = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}", arguments.feature):
         parser.error("--feature must be 1-120 letters, digits, hyphens, or underscores")
@@ -153,13 +203,20 @@ def main():
         }
         if arguments.command == "context":
             result["CURRENT_REPOSITORIES"] = repository_context(metadata["repositories"])
+        if arguments.command == "branch":
+            result["MODE"] = "local-branch-apply" if arguments.apply else "local-branch-preview"
+            result["BRANCH"] = feature_branch(metadata, arguments)
         print(
             json.dumps(result, indent=2)
             if arguments.json
             else "\n".join(f"{key}: {value}" for key, value in result.items())
         )
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
-        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        detail = (
+            f"{error.stderr.strip()}\nGit may have changed state; inspect before retrying. No rollback attempted."
+            if isinstance(error, subprocess.CalledProcessError) and arguments.command == "branch" and arguments.apply
+            else error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        )
         print(f"ERROR: {detail}", file=sys.stderr)
         return 1
     return 0

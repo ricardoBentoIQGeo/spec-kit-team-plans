@@ -51,6 +51,7 @@ class WorkspacePlanningTests(unittest.TestCase):
                 self.git(self.base / name, "rev-parse", "HEAD"),
                 self.git(self.base / name, "rev-parse", "--abbrev-ref", "HEAD"),
                 self.git(self.base / name, "status", "--porcelain=v1"),
+                self.git(self.base / name, "for-each-ref", "--format=%(refname):%(objectname)"),
             )
             for name in ("core", "apps")
         }
@@ -148,6 +149,130 @@ class WorkspacePlanningTests(unittest.TestCase):
         (self.shared / ".ai/specs" / FEATURE / "plan.md").symlink_to(destination)
         self.assertIn("symlinks", self.run_cli("plan", success=False))
         self.assertEqual(destination.read_text(), "Do not overwrite\n")
+
+    def test_branch_preview_then_apply_targets_only_selected_checkout(self):
+        created = self.create("core", "apps")
+        feature_json = self.shared / ".ai/specs" / FEATURE / "feature.json"
+        original = feature_json.read_bytes()
+        branch = f"enh/{FEATURE}"
+        preview = self.run_cli("branch", "--repo", "core", "--branch", branch, cwd=self.base / "apps")
+        self.assertEqual(preview["MODE"], "local-branch-preview")
+        self.assertFalse(preview["BRANCH"]["APPLIED"])
+        self.assertEqual(self.code_state(), self.before)
+        self.assertEqual(preview["BRANCH"]["COMMAND"], [
+            "git", "-C", str(self.base / "core"), "checkout", "-b", branch,
+            created["BASELINE"]["repositories"]["core"]["revision"],
+        ])
+        applied = self.run_cli("branch", "--repo", "core", "--branch", branch, "--apply")
+        self.assertEqual(applied["MODE"], "local-branch-apply")
+        self.assertTrue(applied["BRANCH"]["APPLIED"])
+        after = self.code_state()
+        self.assertEqual(after["apps"], self.before["apps"])
+        self.assertEqual(after["core"][:3], (self.before["core"][0], branch, ""))
+        self.assertIn(f"refs/heads/{branch}:", after["core"][3])
+        self.assertEqual(feature_json.read_bytes(), original)
+        self.before = after
+        self.run_cli("plan")
+        self.run_cli("tasks")
+        context = self.run_cli("context")
+        self.assertEqual(context["CURRENT_REPOSITORIES"]["core"]["branch"], branch)
+        self.assertEqual(context["BASELINE"], created["BASELINE"])
+        self.assertIn("changed since", self.run_cli(
+            "branch", "--repo", "core", "--branch", "enh/another", "--apply", success=False
+        ))
+
+    def test_apps_branch_can_use_its_own_literal_name_without_touching_core(self):
+        self.create("apps")
+        branch = "feature/native-only-experiment"
+        result = self.run_cli(
+            "branch", "--repo", "apps", "--branch", branch, "--apply", cwd=self.base / "core"
+        )
+        self.assertEqual(result["BRANCH"]["HOST_PATH"], str(self.base / "apps"))
+        after = self.code_state()
+        self.assertEqual(after["core"], self.before["core"])
+        self.assertEqual(after["apps"][:3], (self.before["apps"][0], branch, ""))
+        self.assertIn(f"refs/heads/{branch}:", after["apps"][3])
+        self.before = after
+
+    def test_branch_rejects_dirty_checkout_before_creating_refs(self):
+        repository = self.base / "core"
+        tracked = repository / "tracked.txt"
+        tracked.write_text("baseline\n")
+        self.git(repository, "add", "tracked.txt")
+        self.git(
+            repository, "-c", "user.name=Planning Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "Tracked fixture",
+        )
+        self.create("core", "apps")
+        tracked.write_text("modified\n")
+        for staged in (False, True):
+            if staged:
+                self.git(repository, "add", "tracked.txt")
+            self.before = self.code_state()
+            self.assertIn("changes", self.run_cli(
+                "branch", "--repo", "core", "--branch", f"enh/{FEATURE}", "--apply", success=False
+            ))
+            self.assertEqual(self.code_state(), self.before)
+        untracked = self.base / "apps" / "untracked.txt"
+        untracked.write_text("new\n")
+        self.before = self.code_state()
+        self.assertIn("changes", self.run_cli(
+            "branch", "--repo", "apps", "--branch", f"enh/{FEATURE}", "--apply", success=False
+        ))
+
+    def test_branch_rejects_unselected_existing_and_invalid_names(self):
+        self.create("core")
+        self.assertIn("not selected", self.run_cli(
+            "branch", "--repo", "apps", "--branch", f"enh/{FEATURE}", "--apply", success=False
+        ))
+        self.assertIn("already exists", self.run_cli(
+            "branch", "--repo", "core", "--branch", self.before["core"][1], "--apply", success=False
+        ))
+        for branch in ("bad name", "../escape", "-invalid", "@{-1}"):
+            with self.subTest(branch=branch):
+                self.run_cli("branch", "--repo", "core", f"--branch={branch}", "--apply", success=False)
+
+    def test_branch_rejects_changed_head_mapping_and_operations(self):
+        self.create("core")
+        metadata = self.shared / ".ai/specs" / FEATURE / "feature.json"
+        original = json.loads(metadata.read_text())
+        for field, value in (("revision", "0" * 40), ("branch", "other"), ("host_path", "/different")):
+            data = json.loads(json.dumps(original))
+            data["repositories"]["core"][field] = value
+            metadata.write_text(json.dumps(data))
+            self.run_cli("branch", "--repo", "core", "--branch", f"enh/{FEATURE}", "--apply", success=False)
+        metadata.write_text(json.dumps(original))
+        repository = self.base / "core"
+        state = repository / ".git/rebase-merge"
+        state.mkdir()
+        self.assertIn("operation in progress", self.run_cli(
+            "branch", "--repo", "core", "--branch", f"enh/{FEATURE}", "--apply", success=False
+        ))
+        state.rmdir()
+        self.git(repository, "-c", "core.hooksPath=/dev/null", "checkout", "--detach", "-q")
+        self.before = self.code_state()
+        self.assertIn("detached", self.run_cli(
+            "branch", "--repo", "core", "--branch", f"enh/{FEATURE}", "--apply", success=False
+        ))
+
+    def test_checkout_hook_failure_is_reported_without_automatic_rollback(self):
+        repository = self.base / "core"
+        hooks = repository / ".git/hooks"
+        self.git(repository, "config", "core.hooksPath", str(hooks))
+        hook = hooks / "post-checkout"
+        hook.write_text("#!/bin/sh\nprintf 'Fixture checkout hook failed\\n' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.create("core")
+        branch = f"enh/{FEATURE}"
+        error = self.run_cli(
+            "branch", "--repo", "core", "--branch", branch, "--apply", success=False
+        )
+        self.assertIn("Fixture checkout hook failed", error)
+        self.assertIn("No rollback attempted", error)
+        after = self.code_state()
+        self.assertEqual(after["apps"], self.before["apps"])
+        self.assertEqual(after["core"][:3], (self.before["core"][0], branch, ""))
+        self.before = after
 
 
 if __name__ == "__main__":

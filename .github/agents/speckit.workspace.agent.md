@@ -1,17 +1,18 @@
 ---
-description: Experimental cross-repository Spec Kit planning, writing only shared planning artifacts.
+description: Experimental shared Spec Kit planning with explicitly approved local branch creation.
 tools: ["read", "search", "edit", "execute"]
 ---
 
-# Planning-only workspace Spec Kit
+# Planning-first workspace Spec Kit
 
 Read this repository's `.github/copilot-instructions.md` before acting.
 Resolve the shared planning repository by its workspace folder and
-`.ai/workspace.json`, not the current terminal directory. All writes stay in
-that repository. Core/apps may be inspected but never modified or executed.
+`.ai/workspace.json`, not the current terminal directory. All planning artifact
+writes stay in that repository. Core/apps may be inspected; only the separately approved
+Branch stage may change their local Git branches.
 This is not the standalone core Spec Kit agent.
 
-Use the requested stage (specify, plan, or tasks). Ask for an explicit feature
+Use the requested stage (specify, plan, tasks, or branch). Ask for an explicit feature
 ID and, when creating a feature, the participating repositories and description
 if missing. A Jira ID is optional; do not fetch or update Jira automatically.
 
@@ -55,3 +56,23 @@ Do not invoke core's Spec Kit scripts.
 
 If a command fails, surface its error. Existing artifacts are intentionally
 not overwritten by scaffold commands; do not delete them to retry.
+
+## Branch
+
+1. Require an existing feature ID, exactly one repository selected in that
+   feature, and a complete branch name. Prefer `enh/<TICKET>-<description>`
+   when a ticket exists; otherwise ask for the desired literal name.
+2. Run `branch --feature <id> --repo <core|apps> --branch <name> --json`
+   WITHOUT `--apply`. This previews and preflights the selected repository.
+3. Show the absolute checkout path, baseline branch/HEAD, proposed branch,
+   and that checkout will affect other windows/devcontainers using these files.
+4. Ask for explicit approval of that exact repository/name before running
+   the same command with `--apply`. A request to plan or create tasks does
+   not authorize creating a branch. Never apply automatically after preview.
+5. On rejection by clean-state/baseline/existing-branch guards, report the
+   blocker. Do not stash, reset, change metadata, or choose another branch to
+   bypass it. If Git fails during apply, inspect state read-only and report;
+   never roll back automatically.
+6. Report the verified branch and unchanged commit. Stop; no implementation,
+   commits, pushes, or Jira updates. Repeat preview/approval separately for
+   another repository. Never push, even after branch approval.
