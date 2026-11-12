@@ -1,0 +1,16 @@
+{
+  "repositories": {
+    "core": {
+      "path": "../core",
+      "description": "Platform server and web client",
+      "validation_environment": "devcontainer",
+      "container_path": "/opt/iqgeo/platform"
+    },
+    "apps": {
+      "path": "../apps",
+      "description": "Native applications, Electron, and Capacitor plugins",
+      "validation_environment": "host; inspect the specific command before planning container execution",
+      "container_path": "/opt/iqgeo/apps"
+    }
+  }
+}
